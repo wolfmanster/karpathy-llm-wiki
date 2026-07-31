@@ -21,3 +21,9 @@ xmlcov/
 
 # MinerU-GUI 解析产物(output 由 submodule 自己的 .gitignore 忽略,这里兜底)
 output/
+
+# LLM 知识库私有内容(保留目录结构,但不提交内容)
+raw/*
+!raw/.gitkeep
+wiki/*
+!wiki/.gitkeep
