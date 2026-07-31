@@ -1,0 +1,3 @@
+[submodule "MinerU-GUI"]
+	path = MinerU-GUI
+	url = https://github.com/wolfmanster/MinerU-GUI.git

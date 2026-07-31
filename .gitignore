@@ -1,0 +1,23 @@
+# macOS / editor
+.DS_Store
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# Coverage
+.coverage
+.coverage.*
+htmlcov/
+xmlcov/
+
+# MinerU-GUI 解析产物(output 由 submodule 自己的 .gitignore 忽略,这里兜底)
+output/
