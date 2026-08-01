@@ -1,3 +1,6 @@
 [submodule "MinerU-GUI"]
 	path = MinerU-GUI
 	url = https://github.com/wolfmanster/MinerU-GUI.git
+[submodule "wiki"]
+	path = wiki
+	url = https://github.com/Astro-Han/karpathy-llm-wiki.git
