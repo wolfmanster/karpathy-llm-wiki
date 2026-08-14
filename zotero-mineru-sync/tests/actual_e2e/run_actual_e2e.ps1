@@ -133,7 +133,7 @@ try {
   }
   $finalEntries = @($result.final_result.entries)
   $finalSuccessEntries = @($finalEntries | Where-Object { $_.status -eq "SUCCESS" })
-  if ($result.final_result.counts.SUCCESS -ne 1 -or $finalSuccessEntries.Count -ne 1) {
+  if ($finalEntries.Count -ne 1 -or $result.final_result.counts.SUCCESS -ne 1 -or $finalSuccessEntries.Count -ne 1) {
     throw "post-merge result did not contain exactly one successful conversion"
   }
   if ($finalSuccessEntries[0].parent_item_key -ne $result.surviving_parent_item_key -or
@@ -142,8 +142,11 @@ try {
   }
   $allResults = @(Get-ChildItem -LiteralPath (Join-Path $outputRoot "results") -Filter *.json -File -ErrorAction SilentlyContinue |
     ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw -Encoding UTF8 | ConvertFrom-Json })
-  $successEntries = @($allResults | ForEach-Object { @($_.entries) } | Where-Object { $_.status -eq "SUCCESS" })
-  if ($successEntries.Count -ne 1) { throw "expected exactly one successful conversion result, found $($successEntries.Count)" }
+  $conversionEntries = @($allResults | ForEach-Object { @($_.entries) } |
+    Where-Object { $_.status -eq "SUCCESS" -or $_.status -eq "FAILED" })
+  if ($conversionEntries.Count -ne 1 -or $conversionEntries[0].status -ne "SUCCESS") {
+    throw "expected exactly one successful conversion attempt, found $($conversionEntries.Count) terminal conversion entries"
+  }
   if ($result.archive_count_after_merge -ne 1) { throw "expected exactly one archive manifest, found $($result.archive_count_after_merge)" }
   $artifact = Join-Path $outputRoot ("archive\{0}\{1}\{2}" -f $result.final_result.library_id, $result.surviving_parent_item_key, $result.surviving_attachment_key)
   if (-not (Test-Path -LiteralPath (Join-Path $artifact "manifest.json"))) { throw "manifest.json is missing: $artifact" }
