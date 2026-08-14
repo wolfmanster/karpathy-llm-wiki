@@ -5,6 +5,7 @@ import sqlite3
 import importlib
 import subprocess
 import sys
+from uuid import uuid4
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import sys
@@ -18,6 +19,7 @@ if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
 from zotero_mineru_sync.models import ProtocolError, validate_request
+from zotero_mineru_sync.cli import main as cli_main
 from zotero_mineru_sync.paths import SyncPaths
 from zotero_mineru_sync.runner import SyncRunner
 from zotero_mineru_sync.lock import SyncLock
@@ -75,6 +77,16 @@ def test_protocol_rejects_unknown_schema():
 def test_default_data_root_stays_inside_the_integration_project(monkeypatch):
     monkeypatch.delenv("ZOTERO_MINERU_DATA_ROOT", raising=False)
     assert SyncPaths.from_root().root == PACKAGE_ROOT / "runtime"
+
+
+def test_production_data_root_must_stay_inside_the_integration_project():
+    assert SyncPaths.from_project_root(PACKAGE_ROOT / ".testdata" / "runtime").root.is_relative_to(PACKAGE_ROOT)
+    outside_root = PACKAGE_ROOT.parent / "outside-sync-data"
+    with pytest.raises(ValueError, match="inside the synchronizer directory"):
+        SyncPaths.from_project_root(outside_root)
+    with pytest.raises(SystemExit) as error:
+        cli_main([str(outside_root / "request.json"), "--data-root", str(outside_root)])
+    assert error.value.code == 2
 
 
 def test_success_is_serialized_and_is_idempotent(tmp_path):
@@ -386,7 +398,7 @@ def test_cli_subprocess_processes_request_end_to_end(tmp_path):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        data_root = tmp_path / "data"
+        data_root = PACKAGE_ROOT / ".testdata" / f"cli-subprocess-{uuid4().hex}"
         request_path = data_root / "requests" / "cli-request.json"
         request_path.parent.mkdir(parents=True)
         write_request(request_path, request(request_id="cli-request"))

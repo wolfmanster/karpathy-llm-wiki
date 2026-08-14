@@ -88,13 +88,22 @@ class SyncRunner:
             raise CandidateDecisionError("SKIPPED", "local PDF does not exist or is not a PDF")
         return path, parent_data
 
-    def _record_status(self, state: StateStore, request: dict[str, Any], item: dict[str, Any],
-                       status: str, reason: str) -> dict[str, Any]:
+    def _record(self, state: StateStore, request: dict[str, Any], item: dict[str, Any], status: str,
+                *, reason: str | None = None, artifact_path: str | None = None,
+                markdown: str | None = None, successful_version: int | None = None) -> dict[str, Any]:
         state.record(library_id=request["library_id"], parent_item_key=item["parent_item_key"],
                      attachment_key=item["attachment_key"], attachment_version=item["attachment_version"],
                      status=status, request_id=request["request_id"], updated_at=utc_now(),
-                     error_summary=reason)
-        return self._entry(item, status=status, reason=reason)
+                     artifact_path=artifact_path, error_summary=reason,
+                     successful_version=successful_version)
+        entry = self._entry(item, status=status)
+        if reason is not None:
+            entry["reason"] = reason
+        if artifact_path is not None:
+            entry["artifact_path"] = artifact_path
+        if markdown is not None:
+            entry["markdown"] = markdown
+        return entry
 
     def run(self, request_path: str | Path) -> dict[str, Any]:
         self.paths.prepare()
@@ -106,21 +115,21 @@ class SyncRunner:
             with StateStore(self.paths.state_db) as state:
                 ready: list[tuple[dict[str, Any], Path, dict[str, Any]]] = []
                 for item in request.get("blocked_duplicates", []):
-                    entries.append(self._record_status(state, request, item, "BLOCKED_DUPLICATE",
-                                                       "plugin marked duplicate"))
+                    entries.append(self._record(state, request, item, "BLOCKED_DUPLICATE",
+                                                reason="plugin marked duplicate"))
                 for item in request["candidates"]:
                     try:
                         path, parent_data = self._current(item, request["library_id"])
                     except CandidateDecisionError as exc:
                         reason = str(exc)
-                        entries.append(self._record_status(state, request, item, exc.status, reason))
+                        entries.append(self._record(state, request, item, exc.status, reason=reason))
                         if exc.status == "STALE":
                             document = result_document(request, entries, "STALE")
                             self._atomic_json(result_file, document)
                             return document
                         continue
                     except Exception as exc:
-                        entries.append(self._record_status(state, request, item, "FAILED", str(exc)))
+                        entries.append(self._record(state, request, item, "FAILED", reason=str(exc)))
                         continue
                     prior = state.get(request["library_id"], item["attachment_key"])
                     successful_version = prior["successful_version"] if prior else None
@@ -128,12 +137,10 @@ class SyncRunner:
                             and (successful_version if successful_version is not None else prior["attachment_version"]) == item["attachment_version"]
                             and not item.get("force", False)):
                         artifact_path = prior["artifact_path"]
-                        entries.append(self._entry(item, status="SKIPPED", reason="attachment version already succeeded",
-                                                   artifact_path=artifact_path))
-                        state.record(library_id=request["library_id"], parent_item_key=item["parent_item_key"],
-                                     attachment_key=item["attachment_key"], attachment_version=item["attachment_version"],
-                                     status="SKIPPED", request_id=request["request_id"], updated_at=utc_now(),
-                                     artifact_path=artifact_path, successful_version=item["attachment_version"])
+                        entries.append(self._record(
+                            state, request, item, "SKIPPED", reason="attachment version already succeeded",
+                            artifact_path=artifact_path, successful_version=item["attachment_version"],
+                        ))
                         continue
                     ready.append((item, path, parent_data))
 
@@ -160,20 +167,17 @@ class SyncRunner:
                                     "attachment_key": item["attachment_key"], "attachment_version": item["attachment_version"],
                                     "markdown": str(output_md), "language": lang, "backend": "pipeline", "device": "cpu"}
                         self._atomic_json(artifact_dir / "manifest.json", manifest)
-                        entries.append(self._entry(item, status="SUCCESS", artifact_path=str(artifact_dir), markdown=str(output_md)))
-                        state.record(library_id=request["library_id"], parent_item_key=item["parent_item_key"],
-                                     attachment_key=item["attachment_key"], attachment_version=item["attachment_version"],
-                                     status="SUCCESS", request_id=request["request_id"], updated_at=utc_now(),
-                                     artifact_path=str(artifact_dir), successful_version=item["attachment_version"])
+                        entries.append(self._record(
+                            state, request, item, "SUCCESS", artifact_path=str(artifact_dir),
+                            markdown=str(output_md), successful_version=item["attachment_version"],
+                        ))
                     except Exception as exc:
                         if not (artifact_dir / "mineru.log").exists():
                             (artifact_dir / "mineru.log").write_text(traceback.format_exc(), encoding="utf-8")
                         reason = str(exc)
-                        entries.append(self._entry(item, status="FAILED", reason=reason, artifact_path=str(artifact_dir)))
-                        state.record(library_id=request["library_id"], parent_item_key=item["parent_item_key"],
-                                     attachment_key=item["attachment_key"], attachment_version=item["attachment_version"],
-                                     status="FAILED", request_id=request["request_id"], updated_at=utc_now(),
-                                     artifact_path=str(artifact_dir), error_summary=reason)
+                        entries.append(self._record(
+                            state, request, item, "FAILED", reason=reason, artifact_path=str(artifact_dir),
+                        ))
                 document = result_document(request, entries)
                 self._atomic_json(result_file, document)
                 return document

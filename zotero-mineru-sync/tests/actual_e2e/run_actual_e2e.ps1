@@ -11,7 +11,7 @@ $marker = Join-Path $runRoot "seed-marker.json"
 $extensions = Join-Path $profile "extensions"
 $pluginXpi = Join-Path $runRoot "zotero-mineru-sync.xpi"
 $launcher = Join-Path $runRoot "launch-sync.cmd"
-$mineruPython = "C:\Users\70918\Desktop\LLM WIKI\MinerU-GUI\.venv\Scripts\python.exe"
+$mineruPython = Join-Path $project "..\MinerU-GUI\.venv\Scripts\python.exe"
 $zotero = "C:\Program Files\Zotero\zotero.exe"
 
 foreach ($path in @($runRoot, $profile, $dataDir, $outputRoot, $extensions)) {

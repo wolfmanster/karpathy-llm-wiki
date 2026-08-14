@@ -10,14 +10,19 @@ from pathlib import Path
 _SAFE_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
+def integration_root() -> Path:
+    """Return the repository-owned synchronizer directory."""
+    return Path(__file__).resolve().parents[1]
+
+
 def local_data_root() -> Path:
     override = os.environ.get("ZOTERO_MINERU_DATA_ROOT")
     if override:
-        return Path(override).expanduser().resolve()
+        return Path(override).expanduser()
     # Keep the default state alongside this integration component. The plugin
     # always passes its explicitly configured project-local data root, while
     # this fallback makes direct CLI use safe as well.
-    return Path(__file__).resolve().parents[1] / "runtime"
+    return integration_root() / "runtime"
 
 
 @dataclass(frozen=True)
@@ -27,6 +32,15 @@ class SyncPaths:
     @classmethod
     def from_root(cls, root: str | Path | None = None) -> "SyncPaths":
         return cls(Path(root) if root is not None else local_data_root())
+
+    @classmethod
+    def from_project_root(cls, root: str | Path | None = None) -> "SyncPaths":
+        """Construct production paths while keeping runtime data in this component."""
+        candidate = (Path(root) if root is not None else local_data_root()).expanduser().resolve()
+        component = integration_root().resolve()
+        if not candidate.is_relative_to(component):
+            raise ValueError(f"data root must be inside the synchronizer directory: {component}")
+        return cls(candidate)
 
     @property
     def requests(self) -> Path:
