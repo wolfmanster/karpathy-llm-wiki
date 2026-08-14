@@ -173,9 +173,11 @@ async function runLifecycle() {
     dataRoot,
     (result) => result.request_id !== blocked.request_id
       && result.counts?.SUCCESS === 1
-      && (result.entries || []).filter((entry) => entry.status === "SUCCESS").length === 1
-      && result.entries.filter((entry) => entry.status === "SUCCESS")[0].parent_item_key === master.key
-      && result.entries.filter((entry) => entry.status === "SUCCESS")[0].attachment_key === survivingAttachmentKey,
+      && Array.isArray(result.entries)
+      && result.entries.length === 1
+      && result.entries[0].status === "SUCCESS"
+      && result.entries[0].parent_item_key === master.key
+      && result.entries[0].attachment_key === survivingAttachmentKey,
     "the post-merge successful result"
   );
   await writeMarker(marker, {
