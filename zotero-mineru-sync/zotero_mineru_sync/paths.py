@@ -14,8 +14,10 @@ def local_data_root() -> Path:
     override = os.environ.get("ZOTERO_MINERU_DATA_ROOT")
     if override:
         return Path(override).expanduser().resolve()
-    local_app_data = os.environ.get("LOCALAPPDATA")
-    return Path(local_app_data, "ZoteroMinerU") if local_app_data else Path.home() / ".local" / "share" / "ZoteroMinerU"
+    # Keep the default state alongside this integration component. The plugin
+    # always passes its explicitly configured project-local data root, while
+    # this fallback makes direct CLI use safe as well.
+    return Path(__file__).resolve().parents[1] / "runtime"
 
 
 @dataclass(frozen=True)

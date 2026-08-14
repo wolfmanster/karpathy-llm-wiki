@@ -55,7 +55,8 @@ class StateStore:
             VALUES(?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(library_id,attachment_key) DO UPDATE SET
               parent_item_key=excluded.parent_item_key, attachment_version=excluded.attachment_version,
-              status=excluded.status, successful_version=excluded.successful_version,
+              status=excluded.status,
+              successful_version=COALESCE(excluded.successful_version, attachment_state.successful_version),
               artifact_path=excluded.artifact_path,
               error_summary=excluded.error_summary, last_request_id=excluded.last_request_id,
               updated_at=excluded.updated_at

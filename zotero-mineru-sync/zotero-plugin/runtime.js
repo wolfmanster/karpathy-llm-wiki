@@ -34,13 +34,8 @@ var ZoteroMineruRuntime = (() => {
   }
 
   function dataRoot(settings) {
-    if (settings.dataRoot) return nativePath(settings.dataRoot);
-    try {
-      const local = Services.dirsvc.get("LocalAppData", Ci.nsIFile).path;
-      return nativePath(`${local}/ZoteroMinerU`);
-    } catch (_) {
-      return nativePath(`${Zotero.getStorageDirectory().parent.path}/ZoteroMinerU`);
-    }
+    if (String(settings.dataRoot || "").trim()) return nativePath(settings.dataRoot);
+    throw new Error("Set a project-local Zotero-MinerU data root before enabling synchronization");
   }
 
   function atomicWrite(path, document) {
@@ -316,9 +311,10 @@ var ZoteroMineruRuntime = (() => {
     resync.addEventListener("command", () => {
       const pane = Zotero.getActiveZoteroPane?.() || window.ZoteroPane;
       const item = pane?.getSelectedItems?.()[0];
-      if (item) {
-        state.forceKeys.add(item.key);
-        state.queue.add([item.key]);
+      const key = parentKey(item);
+      if (key) {
+        state.forceKeys.add(key);
+        state.queue.add([key]);
       }
     });
     full.addEventListener("command", () => {

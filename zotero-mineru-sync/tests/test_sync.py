@@ -72,6 +72,11 @@ def test_protocol_rejects_unknown_schema():
         validate_request(request(schema_version=99))
 
 
+def test_default_data_root_stays_inside_the_integration_project(monkeypatch):
+    monkeypatch.delenv("ZOTERO_MINERU_DATA_ROOT", raising=False)
+    assert SyncPaths.from_root().root == PACKAGE_ROOT / "runtime"
+
+
 def test_success_is_serialized_and_is_idempotent(tmp_path):
     pdf = tmp_path / "paper.pdf"
     pdf.write_bytes(b"%PDF-1.7")
@@ -123,6 +128,36 @@ def test_force_resync_reprocesses_same_successful_version(tmp_path):
     result = runner.run(request_path)
     assert result["counts"] == {"SUCCESS": 1}
     assert len(calls) == 2
+
+
+def test_non_success_status_does_not_forget_a_successful_version(tmp_path):
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF")
+    paths = SyncPaths.from_root(tmp_path / "data")
+    request_path = tmp_path / "request.json"
+    calls = []
+
+    def convert(_path, **kwargs):
+        calls.append(1)
+        out = Path(kwargs["output_dir"])
+        out.mkdir(parents=True, exist_ok=True)
+        md = out / "paper.md"
+        md.write_text("# Paper", encoding="utf-8")
+        return SimpleNamespace(success=True, output_md=md, log_lines=[], error=None)
+
+    api = FakeAPI(pdf)
+    runner = SyncRunner(paths, api, converter=convert)
+    write_request(request_path)
+    assert runner.run(request_path)["counts"] == {"SUCCESS": 1}
+
+    api.content_type = "text/plain"
+    write_request(request_path, request(request_id="non-pdf"))
+    assert runner.run(request_path)["counts"] == {"SKIPPED": 1}
+
+    api.content_type = "application/pdf"
+    write_request(request_path, request(request_id="available-again"))
+    assert runner.run(request_path)["counts"] == {"SKIPPED": 1}
+    assert len(calls) == 1
 
 
 def test_new_attachment_version_is_parsed_again(tmp_path):

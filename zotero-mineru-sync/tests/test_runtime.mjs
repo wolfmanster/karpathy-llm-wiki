@@ -18,6 +18,24 @@ const prefs = new Map([
 let timerCallback;
 let notifier;
 let processCount = 0;
+let duplicateSets = [[1, 2]];
+const menuNodes = [];
+const menuParent = {
+  querySelector: (selector) => menuNodes.find((node) => `#${node.id}` === selector),
+  append: (...nodes) => menuNodes.push(...nodes)
+};
+const menuDocument = {
+  getElementById: (id) => id === "zotero-itemmenu" ? menuParent : menuNodes.find((node) => node.id === id),
+  createXULElement: () => {
+    const node = { setAttribute() {}, remove() {} };
+    node.addEventListener = (_event, handler) => { node.command = handler; };
+    return node;
+  }
+};
+const mainWindow = {
+  document: menuDocument,
+  ZoteroPane: { getSelectedItems: () => [items.get("A1")] }
+};
 const parent = (key, id) => ({ key, id, version: 1, parentItem: false, isRegularItem: () => true, getAttachments: () => [id + 100], getField: (field) => field === "language" ? "zh-CN" : "" });
 const attachment = (key, id, parentKey) => ({ key, id, version: 2, parentKey, isAttachment: () => true, attachmentContentType: "application/pdf" });
 const items = new Map([["P1", parent("P1", 1)], ["P2", parent("P2", 2)], ["A1", attachment("A1", 101, "P1")], ["A2", attachment("A2", 102, "P2")], [1, parent("P1", 1)], [2, parent("P2", 2)], [101, attachment("A1", 101, "P1")], [102, attachment("A2", 102, "P2")]]);
@@ -75,7 +93,7 @@ const context = {
       constructor() { this.libraryID = null; }
       async search() { return [1, 2, 101, 102]; }
     },
-    Duplicates: { getSets: () => [[1, 2]] },
+    Duplicates: { getSets: () => duplicateSets },
     Notifier: { registerObserver: (observer) => { notifier = observer; }, unregisterObserver: () => {} },
     PreferencePanes: { register: () => {} },
     File: { pathToFile: (file) => file },
@@ -97,13 +115,24 @@ assert.equal(request.candidates.length, 0);
 assert.equal(request.blocked_duplicates.length, 2);
 assert.equal(request.library_id, "0");
 assert.ok(notifier, "Zotero notifier should be registered");
+context.ZoteroMineruRuntime.onMainWindowLoad({ window: mainWindow });
+duplicateSets = [];
+const resync = menuNodes.find((node) => node.id === "zotero-mineru-resync-item");
+assert.ok(resync, "resync menu should be installed");
+resync.command();
+await timerCallback();
+assert.equal(processCount, 2, "resyncing a selected attachment should run its parent item");
+const resyncRequest = (await Promise.all((await fs.readdir(path.join(root, "requests"))).map(async (file) =>
+  JSON.parse(await fs.readFile(path.join(root, "requests", file), "utf8"))
+))).find((candidate) => candidate.candidates[0]?.force === true);
+assert.deepEqual(resyncRequest.candidates.map((item) => item.parent_item_key), ["P1"]);
 items.delete("P2");
 items.delete(2);
 items.delete("A2");
 items.delete(102);
 notifier.notify("delete", "item", [2, 102]);
 await timerCallback();
-assert.equal(processCount, 2, "deletion should retrigger the affected parent");
+assert.equal(processCount, 3, "deletion should retrigger the affected parent");
 const allRequests = (await fs.readdir(path.join(root, "requests"))).sort();
 const mergedRequest = JSON.parse(await fs.readFile(path.join(root, "requests", allRequests.at(-1)), "utf8"));
 assert.deepEqual(mergedRequest.candidates.map((item) => item.parent_item_key), ["P1"],
