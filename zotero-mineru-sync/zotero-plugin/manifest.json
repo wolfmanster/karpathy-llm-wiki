@@ -1,0 +1,13 @@
+{
+  "manifest_version": 2,
+  "name": "Zotero–MinerU event sync",
+  "version": "0.1.0",
+  "description": "Event-triggered local Zotero PDF archiving through MinerU.",
+  "applications": { "zotero": {
+    "id": "zotero-mineru-sync@local",
+    "update_url": "https://example.invalid/zotero-mineru-sync/updates.json",
+    "strict_min_version": "7.0",
+    "strict_max_version": "9.0.*"
+  } },
+  "content_security_policy": "default-src 'self'; style-src 'self' 'unsafe-inline'"
+}

@@ -1,0 +1,12 @@
+{
+  "manifest_version": 2,
+  "name": "Zotero–MinerU actual E2E helper",
+  "version": "0.1.0",
+  "description": "Creates isolated Zotero data for the local E2E test.",
+  "applications": { "zotero": {
+    "id": "zotero-mineru-sync-e2e-helper@local",
+    "update_url": "https://example.invalid/zotero-mineru-sync-e2e-helper/updates.json",
+    "strict_min_version": "7.0",
+    "strict_max_version": "9.0.*"
+  } }
+}
