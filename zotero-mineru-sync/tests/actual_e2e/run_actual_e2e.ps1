@@ -7,6 +7,7 @@ $profile = Join-Path $runRoot "profile"
 $dataDir = Join-Path $runRoot "data"
 $outputRoot = Join-Path $runRoot "sync-data"
 $fixture = Join-Path $runRoot "paper.pdf"
+$fixtureSource = Join-Path $PSScriptRoot "fixtures\test.pdf"
 $marker = Join-Path $runRoot "seed-marker.json"
 $extensions = Join-Path $profile "extensions"
 $pluginXpi = Join-Path $runRoot "zotero-mineru-sync.xpi"
@@ -19,16 +20,11 @@ foreach ($path in @($runRoot, $profile, $dataDir, $outputRoot, $extensions)) {
   New-Item -ItemType Directory -Force -Path $path | Out-Null
 }
 
-# Produce a valid, project-local PDF without using an external fixture.
-@"
-from pathlib import Path
-from pypdf import PdfWriter
-writer = PdfWriter()
-writer.add_blank_page(width=612, height=792)
-with Path(r'''$fixture''').open('wb') as handle:
-    writer.write(handle)
-"@ | & python -
+if (-not (Test-Path -LiteralPath $fixtureSource -PathType Leaf)) { throw "E2E PDF fixture is missing: $fixtureSource" }
+Copy-Item -LiteralPath $fixtureSource -Destination $fixture
 if (-not (Test-Path -LiteralPath $fixture -PathType Leaf)) { throw "failed to create project-local PDF fixture: $fixture" }
+if ((Get-FileHash -LiteralPath $fixtureSource -Algorithm SHA256).Hash -ne
+    (Get-FileHash -LiteralPath $fixture -Algorithm SHA256).Hash) { throw "E2E PDF fixture copy failed integrity validation" }
 
 Copy-Item -LiteralPath (Join-Path $project "zotero-plugin") -Destination $pluginSource -Recurse
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "helper\bootstrap.js") -Destination (Join-Path $pluginSource "e2e_helper.js")
@@ -153,9 +149,23 @@ try {
   if (@(Get-ChildItem -LiteralPath $outputRoot -Filter manifest.json -Recurse -File -ErrorAction SilentlyContinue).Count -ne 1) {
     throw "expected exactly one archived manifest"
   }
-  if (@(Get-ChildItem -LiteralPath $artifact -Filter *.md -File -ErrorAction SilentlyContinue).Count -ne 1) {
+  $markdownFiles = @(Get-ChildItem -LiteralPath $artifact -Filter *.md -File -ErrorAction SilentlyContinue)
+  if ($markdownFiles.Count -ne 1) {
     throw "Markdown artifact count is not one: $artifact"
   }
+  $markdownText = Get-Content -LiteralPath $markdownFiles[0].FullName -Raw -Encoding UTF8
+  if (-not $markdownText.Trim() -or $markdownText -notmatch '(?i)Wharton') {
+    throw "Markdown artifact did not contain the expected text extracted from the real fixture"
+  }
+  $attemptEntries = @(Get-ChildItem -LiteralPath (Join-Path $outputRoot "attempts") -Recurse -Force -ErrorAction SilentlyContinue)
+  if ($attemptEntries.Count -ne 0) { throw "successful conversion left stale attempt paths" }
+  $mineruLog = Get-Content -LiteralPath (Join-Path $artifact "mineru.log") -Raw -Encoding UTF8
+  if ($mineruLog -like '*\attempts\*' -or -not $mineruLog.Contains($artifact)) {
+    throw "archived MinerU log did not reference the final artifact directory"
+  }
+  $stateDb = Join-Path $outputRoot "state.sqlite"
+  $deletedStateCount = & python -c "import sqlite3,sys; db=sqlite3.connect(sys.argv[1]); print(db.execute('SELECT COUNT(*) FROM attachment_state WHERE attachment_key=?',(sys.argv[2],)).fetchone()[0]); db.close()" $stateDb $result.duplicate_attachment_key
+  if ([int]$deletedStateCount -ne 0) { throw "deleted duplicate attachment remained in synchronization state" }
   Write-Output "actual Zotero duplicate/merge E2E passed"
 }
 finally {

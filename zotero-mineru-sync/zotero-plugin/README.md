@@ -11,4 +11,6 @@ python -m venv .venv
 .\.venv\Scripts\python -m pip install -e .
 ```
 
-开发和测试阶段的请求、结果、SQLite 状态、日志和归档统一放在项目内 `.testdata/`；最终用户未显式配置时才使用 `%LOCALAPPDATA%\ZoteroMinerU`。
+请求、结果、SQLite 状态、日志和归档必须统一放在 `zotero-mineru-sync/` 内。启用插件前先创建
+`runtime/`（测试使用 `.testdata/`），再在设置页选择该目录；插件不会回退到 `%LOCALAPPDATA%`、
+Zotero profile 或其他项目外目录。

@@ -25,6 +25,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cpu_threads:
         os.environ["OMP_NUM_THREADS"] = str(args.cpu_threads)
         os.environ["MINERU_PDF_RENDER_THREADS"] = str(args.cpu_threads)
+        os.environ["ZOTERO_MINERU_CPU_THREADS"] = str(args.cpu_threads)
     try:
         paths = SyncPaths.from_project_root(args.data_root)
     except ValueError as exc:

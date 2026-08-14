@@ -5,12 +5,11 @@ import sqlite3
 import importlib
 import subprocess
 import sys
-from uuid import uuid4
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
@@ -74,6 +73,25 @@ def test_protocol_rejects_unknown_schema():
         validate_request(request(schema_version=99))
 
 
+def test_protocol_and_paths_reject_unsafe_request_ids(tmp_path):
+    with pytest.raises(ProtocolError, match="request_id contains unsafe characters"):
+        validate_request(request(request_id="../escaped-result", candidates=[]))
+    paths = SyncPaths.from_root(tmp_path / "runtime")
+    with pytest.raises(ValueError, match="unsafe request identifier"):
+        paths.result_file("../escaped-result")
+
+
+def test_cli_contains_protocol_error_results_for_unsafe_request_ids(tmp_path):
+    request_path = tmp_path / "unsafe-request.json"
+    write_request(request_path, request(request_id="../escaped-result", candidates=[]))
+    data_root = tmp_path / "runtime"
+    assert cli_main([str(request_path), "--data-root", str(data_root)]) == 2
+    results = list((data_root / "results").glob("protocol-error-*.json"))
+    assert len(results) == 1
+    assert json.loads(results[0].read_text(encoding="utf-8"))["status"] == "FAILED"
+    assert not (data_root / "escaped-result.json").exists()
+
+
 def test_default_data_root_stays_inside_the_integration_project(monkeypatch):
     monkeypatch.delenv("ZOTERO_MINERU_DATA_ROOT", raising=False)
     assert SyncPaths.from_root().root == PACKAGE_ROOT / "runtime"
@@ -102,7 +120,7 @@ def test_success_is_serialized_and_is_idempotent(tmp_path):
         out = Path(kwargs["output_dir"])
         md = out / "paper.md"
         md.write_text("# Paper", encoding="utf-8")
-        return SimpleNamespace(success=True, output_md=md, log_lines=["done"], error=None)
+        return SimpleNamespace(success=True, output_md=md, log_lines=[f"Output: {md}"], error=None)
 
     runner = SyncRunner(paths, FakeAPI(pdf), converter=convert)
     first = runner.run(request_path)
@@ -114,7 +132,10 @@ def test_success_is_serialized_and_is_idempotent(tmp_path):
         assert db.execute("SELECT status, successful_version FROM attachment_state").fetchone() == ("SKIPPED", 4)
     artifact = paths.archive / "1" / "P1" / "A1"
     assert (artifact / "manifest.json").is_file()
-    assert (artifact / "mineru.log").read_text(encoding="utf-8").strip() == "done"
+    log = (artifact / "mineru.log").read_text(encoding="utf-8").strip()
+    assert str(artifact / "paper.md") in log
+    assert "attempts" not in log
+    assert list(paths.attempts.iterdir()) == []
 
 
 def test_force_resync_reprocesses_same_successful_version(tmp_path):
@@ -140,6 +161,70 @@ def test_force_resync_reprocesses_same_successful_version(tmp_path):
     result = runner.run(request_path)
     assert result["counts"] == {"SUCCESS": 1}
     assert len(calls) == 2
+
+
+def test_failed_force_resync_preserves_the_last_successful_archive(tmp_path):
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF")
+    paths = SyncPaths.from_root(tmp_path / "data")
+    request_path = tmp_path / "request.json"
+    calls = []
+
+    def convert(_path, **kwargs):
+        calls.append(1)
+        out = Path(kwargs["output_dir"])
+        md = out / "paper.md"
+        md.write_text("# replacement" if len(calls) > 1 else "# original", encoding="utf-8")
+        if len(calls) > 1:
+            md.unlink()
+            return SimpleNamespace(success=False, output_md=None, log_lines=["failed"], error="forced failure")
+        return SimpleNamespace(success=True, output_md=md, log_lines=["done"], error=None)
+
+    runner = SyncRunner(paths, FakeAPI(pdf), converter=convert)
+    write_request(request_path)
+    assert runner.run(request_path)["counts"] == {"SUCCESS": 1}
+    artifact_md = paths.archive / "1" / "P1" / "A1" / "paper.md"
+    assert artifact_md.read_text(encoding="utf-8") == "# original"
+
+    forced = request(request_id="req-force-failure", candidates=[{**request()["candidates"][0], "force": True}])
+    write_request(request_path, forced)
+    failed = runner.run(request_path)
+    assert failed["status"] == "FAILED"
+    assert artifact_md.read_text(encoding="utf-8") == "# original"
+    with sqlite3.connect(paths.state_db) as db:
+        status, successful_version, artifact_path = db.execute(
+            "SELECT status, successful_version, artifact_path FROM attachment_state"
+        ).fetchone()
+    assert (status, successful_version, Path(artifact_path)) == ("FAILED", 4, artifact_md.parent)
+
+    write_request(request_path, request(request_id="req-after-force-failure"))
+    assert runner.run(request_path)["counts"] == {"SKIPPED": 1}
+    assert len(calls) == 2
+    assert artifact_md.read_text(encoding="utf-8") == "# original"
+
+
+def test_missing_success_artifact_is_rebuilt_instead_of_skipped(tmp_path):
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF")
+    paths = SyncPaths.from_root(tmp_path / "data")
+    request_path = tmp_path / "request.json"
+    calls = []
+
+    def convert(_path, **kwargs):
+        calls.append(1)
+        md = Path(kwargs["output_dir"]) / "paper.md"
+        md.write_text(f"# build {len(calls)}", encoding="utf-8")
+        return SimpleNamespace(success=True, output_md=md, log_lines=[], error=None)
+
+    runner = SyncRunner(paths, FakeAPI(pdf), converter=convert)
+    write_request(request_path)
+    runner.run(request_path)
+    artifact_md = paths.archive / "1" / "P1" / "A1" / "paper.md"
+    artifact_md.unlink()
+    write_request(request_path, request(request_id="req-repair"))
+    assert runner.run(request_path)["counts"] == {"SUCCESS": 1}
+    assert calls == [1, 1]
+    assert artifact_md.read_text(encoding="utf-8") == "# build 2"
 
 
 def test_non_success_status_does_not_forget_a_successful_version(tmp_path):
@@ -220,6 +305,28 @@ def test_duplicate_candidate_is_blocked_without_local_api(tmp_path):
                         converter=lambda *_args, **_kwargs: pytest.fail("must not parse"))
     result = runner.run(request_path)
     assert result["counts"] == {"BLOCKED_DUPLICATE": 1}
+
+
+def test_removed_attachment_is_deleted_from_sync_state(tmp_path):
+    request_path = tmp_path / "request.json"
+    item = {**request()["candidates"][0]}
+    paths = SyncPaths.from_root(tmp_path / "data")
+    runner = SyncRunner(paths, api=object(), converter=lambda *_args, **_kwargs: pytest.fail("must not parse"))
+
+    write_request(request_path, request(candidates=[], blocked_duplicates=[item]))
+    runner.run(request_path)
+    with sqlite3.connect(paths.state_db) as db:
+        assert db.execute("SELECT COUNT(*) FROM attachment_state").fetchone()[0] == 1
+
+    write_request(request_path, request(
+        request_id="req-remove",
+        candidates=[],
+        removed_attachments=[{"parent_item_key": "P1", "attachment_key": "A1"}],
+    ))
+    result = runner.run(request_path)
+    assert result["status"] == "COMPLETED"
+    with sqlite3.connect(paths.state_db) as db:
+        assert db.execute("SELECT COUNT(*) FROM attachment_state").fetchone()[0] == 0
 
 
 def test_non_pdf_is_skipped_and_persisted(tmp_path):
@@ -332,10 +439,26 @@ def test_conversion_failure_is_recorded_without_retry_in_same_process(tmp_path):
 
     runner = SyncRunner(SyncPaths.from_root(tmp_path / "data"), FakeAPI(pdf), converter=convert)
     result = runner.run(request_path)
+    assert result["status"] == "FAILED"
     assert result["counts"] == {"FAILED": 1}
     assert len(calls) == 1
     with sqlite3.connect(SyncPaths.from_root(tmp_path / "data").state_db) as db:
         assert db.execute("SELECT status, error_summary FROM attachment_state").fetchone() == ("FAILED", "engine error")
+
+
+def test_cli_returns_nonzero_for_failed_result(tmp_path, monkeypatch):
+    import zotero_mineru_sync.cli as cli
+
+    class FailedRunner:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def run(self, _request_path):
+            return {"status": "FAILED"}
+
+    monkeypatch.setattr(cli, "SyncRunner", FailedRunner)
+    data_root = PACKAGE_ROOT / ".testdata" / f"cli-failure-{uuid4().hex}"
+    assert cli.main([str(tmp_path / "request.json"), "--data-root", str(data_root)]) == 1
 
 
 def test_mineru_adapter_loads_upstream_from_any_working_directory(tmp_path, monkeypatch):
@@ -355,6 +478,35 @@ def test_mineru_adapter_loads_upstream_from_any_working_directory(tmp_path, monk
     adapter = importlib.import_module("zotero_mineru_sync.mineru_adapter")
     assert adapter.convert_document("ignored.pdf") == 42
     assert not list(upstream.rglob("__pycache__"))
+
+
+def test_mineru_adapter_reapplies_requested_cpu_threads(monkeypatch):
+    adapter = importlib.import_module("zotero_mineru_sync.mineru_adapter")
+    core = ModuleType("zotero_mineru_test_core")
+
+    def setup_env(_backend, _device):
+        import os
+        os.environ["OMP_NUM_THREADS"] = "28"
+        os.environ["MINERU_PDF_RENDER_THREADS"] = "28"
+
+    core.setup_env = setup_env
+    monkeypatch.setitem(sys.modules, core.__name__, core)
+
+    def run_core():
+        return None
+
+    run_core.__module__ = core.__name__
+
+    def fake_convert(*_args, **kwargs):
+        import os
+        core.setup_env(kwargs["backend"], kwargs["device"])
+        return os.environ["OMP_NUM_THREADS"], os.environ["MINERU_PDF_RENDER_THREADS"]
+
+    api = SimpleNamespace(run_core=run_core, convert_document=fake_convert)
+    monkeypatch.setattr(adapter, "_api_module", lambda: api)
+    monkeypatch.setenv("ZOTERO_MINERU_CPU_THREADS", "1")
+    assert adapter.convert_document("paper.pdf", backend="pipeline", device="cpu") == ("1", "1")
+    assert core.setup_env is setup_env
 
 
 def test_cli_subprocess_processes_request_end_to_end(tmp_path):

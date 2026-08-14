@@ -12,6 +12,9 @@
 `%LOCALAPPDATA%`、Zotero 数据目录或其他用户目录。开发和测试数据固定写入项目内的
 `.testdata/`（该目录已被 Git 忽略）。
 
+启用插件前应先创建输出根目录。插件会解析其真实路径，并要求某个祖先目录同时包含
+`pyproject.toml`、`zotero_mineru_sync/` 和 `zotero-plugin/`；校验通过前不会创建请求文件。
+
 示例：
 
 ```powershell
