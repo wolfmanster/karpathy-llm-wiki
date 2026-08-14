@@ -1,0 +1,17 @@
+<vbox xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+      xmlns:html="http://www.w3.org/1999/xhtml"
+      onload="ZoteroMineruPreferences.init();">
+  <groupbox>
+    <caption label="Zotero–MinerU 同步"/>
+    <label value="同步命令位置"/>
+    <html:input id="zotero-mineru-command" type="text" preference="extensions.zotero-mineru-sync.command"/>
+    <label value="项目内输出根目录（必填；例如 zotero-mineru-sync\\runtime）"/>
+    <html:input id="zotero-mineru-data-root" type="text" preference="extensions.zotero-mineru-sync.dataRoot"/>
+    <html:label><html:input id="zotero-mineru-cpu" type="checkbox" checked="checked" disabled="disabled"/> 使用 CPU pipeline（同步协议固定配置）</html:label>
+    <label value="CPU 线程数（0 = MinerU 默认）"/>
+    <html:input id="zotero-mineru-cpu-threads" type="number" min="0" preference="extensions.zotero-mineru-sync.cpuThreads"/>
+    <html:label><html:input id="zotero-mineru-enabled" type="checkbox" preference="extensions.zotero-mineru-sync.enabled"/> 启用事件触发同步</html:label>
+    <description id="zotero-mineru-summary">当前任务摘要：未运行</description>
+  </groupbox>
+  <script type="application/javascript" src="options.js"/>
+</vbox>

@@ -1,0 +1,5 @@
+{
+  "name": "zotero-mineru-sync-plugin",
+  "private": true,
+  "type": "module"
+}
