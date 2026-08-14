@@ -34,9 +34,35 @@ var ZoteroMineruRuntime = (() => {
     };
   }
 
-  function dataRoot(settings) {
-    if (String(settings.dataRoot || "").trim()) return nativePath(settings.dataRoot);
+  function configuredDataRoot(settings) {
+    const value = String(settings.dataRoot || "").trim();
+    if (value) return nativePath(value);
     throw new Error("Set a project-local Zotero-MinerU data root before enabling synchronization");
+  }
+
+  async function pathExists(path) {
+    if (typeof IOUtils.exists === "function") return IOUtils.exists(path);
+    try { await IOUtils.stat(path); return true; } catch (_) { return false; }
+  }
+
+  async function validatedDataRoot(settings) {
+    let candidate = configuredDataRoot(settings);
+    if (typeof PathUtils.normalize === "function") candidate = PathUtils.normalize(candidate);
+    if (!await pathExists(candidate)) {
+      throw new Error("The Zotero-MinerU data root must already exist inside the integration project");
+    }
+    if (typeof IOUtils.realPath === "function") candidate = await IOUtils.realPath(candidate);
+    let current = candidate;
+    for (let depth = 0; depth < 64; depth += 1) {
+      const hasProjectFile = await pathExists(joinPath(current, "pyproject.toml"));
+      const hasPackage = await pathExists(joinPath(current, "zotero_mineru_sync"));
+      const hasPlugin = await pathExists(joinPath(current, "zotero-plugin"));
+      if (hasProjectFile && hasPackage && hasPlugin) return candidate;
+      const parent = PathUtils.parent(current);
+      if (!parent || parent === current) break;
+      current = parent;
+    }
+    throw new Error("The Zotero-MinerU data root must be inside the zotero-mineru-sync project");
   }
 
   function atomicWrite(path, document) {
@@ -120,7 +146,11 @@ var ZoteroMineruRuntime = (() => {
 
   function rememberItem(item) {
     if (!item || item.id == null || !state?.itemIndex) return;
-    state.itemIndex.set(String(item.id), { key: item.key, parentKey: parentKey(item) });
+    state.itemIndex.set(String(item.id), {
+      key: item.key,
+      parentKey: parentKey(item),
+      isAttachment: Boolean(item.isAttachment?.())
+    });
   }
 
   function getItem(keyOrId) {
@@ -135,14 +165,30 @@ var ZoteroMineruRuntime = (() => {
     const blocked = await duplicateKeys();
     const candidates = [];
     const blockedDuplicates = [];
+    const removedAttachments = new Map();
+    const rememberRemoved = (parentItemKey, attachmentKey) => {
+      if (!parentItemKey || !attachmentKey) return;
+      removedAttachments.set(`${parentItemKey}\u0000${attachmentKey}`, {
+        parent_item_key: parentItemKey,
+        attachment_key: attachmentKey
+      });
+    };
     for (const key of keys) {
       const parent = getItem(key);
-      if (!parent || !parent.isRegularItem?.() || parent.parentItem) continue;
+      if (!parent || parent.deleted) {
+        for (const snapshot of state.itemIndex.values()) {
+          if (snapshot.isAttachment && snapshot.parentKey === key) rememberRemoved(key, snapshot.key);
+        }
+        continue;
+      }
+      if (!parent.isRegularItem?.() || parent.parentItem) continue;
       rememberItem(parent);
+      const currentAttachmentKeys = new Set();
       for (const attachmentKey of parent.getAttachments?.() ?? []) {
         const attachment = getItem(attachmentKey);
-        if (!attachment || !attachment.isAttachment?.()) continue;
+        if (!attachment || attachment.deleted || !attachment.isAttachment?.()) continue;
         rememberItem(attachment);
+        currentAttachmentKeys.add(attachment.key);
         const contentType = attachment.attachmentContentType || attachment.getField?.("contentType");
         if (String(contentType).toLowerCase() !== "application/pdf") continue;
         const candidate = {
@@ -155,8 +201,13 @@ var ZoteroMineruRuntime = (() => {
         if (blocked.has(parent.key)) blockedDuplicates.push(candidate);
         else candidates.push(candidate);
       }
+      for (const snapshot of state.itemIndex.values()) {
+        if (snapshot.isAttachment && snapshot.parentKey === parent.key && !currentAttachmentKeys.has(snapshot.key)) {
+          rememberRemoved(parent.key, snapshot.key);
+        }
+      }
     }
-    return { candidates, blockedDuplicates };
+    return { candidates, blockedDuplicates, removedAttachments: [...removedAttachments.values()] };
   }
 
   async function allParentKeys() {
@@ -214,7 +265,6 @@ var ZoteroMineruRuntime = (() => {
       eligible: true,
       force: forceKeys.has(candidate.parent_item_key)
     }));
-    for (const key of keys) forceKeys.delete(key);
     return {
       schema_version: 1,
       protocol_version: "1",
@@ -223,14 +273,15 @@ var ZoteroMineruRuntime = (() => {
       library_id: String(state.apiLibraryId),
       plugin_generation: String(++state.generation),
       candidates,
-      blocked_duplicates: collected.blockedDuplicates
+      blocked_duplicates: collected.blockedDuplicates,
+      removed_attachments: collected.removedAttachments
     };
   }
 
-  function launch(requestPath, requestId) {
+  function launch(requestPath, requestId, root) {
     const settings = state.settings;
     const args = [requestPath];
-    if (settings.dataRoot) args.push("--data-root", settings.dataRoot);
+    args.push("--data-root", root);
     if (settings.cpuThreads > 0) args.push("--cpu-threads", String(settings.cpuThreads));
     const storageRoot = Zotero.getStorageDirectory?.()?.path;
     if (storageRoot) args.push("--storage-root", nativePath(storageRoot));
@@ -239,20 +290,24 @@ var ZoteroMineruRuntime = (() => {
     return new Promise((resolve, reject) => {
       const observer = {
         observe(_subject, topic, data) {
-          if (topic === "process-finished") resolve(data);
+          if (topic === "process-finished") resolve(Number(data) || 0);
           if (topic === "process-failed") reject(new Error(`sync command failed: ${data}`));
         }
       };
       process.runwAsync(args, args.length, observer, false);
-    }).then(async () => {
-      const resultPath = joinPath(dataRoot(settings), "results", `${requestId}.json`);
+    }).then(async (exitCode) => {
+      const resultPath = joinPath(root, "results", `${requestId}.json`);
       try {
         const result = await IOUtils.readJSON(resultPath);
-        state.settings.lastSummary = JSON.stringify(result.counts || {});
+        state.settings.lastSummary = JSON.stringify({ status: result.status, ...(result.counts || {}) });
         saveSettings(state.settings);
-        if (result.status === "STALE") state.queue.add(state.lastKeys || []);
+        if (exitCode !== 0 && result.status !== "FAILED") {
+          throw new Error(`sync command exited with ${exitCode} but reported ${result.status}`);
+        }
+        return result;
       } catch (error) {
         Zotero.logError(error);
+        throw error;
       }
     });
   }
@@ -269,10 +324,16 @@ var ZoteroMineruRuntime = (() => {
 
   async function runForKeys(keys) {
     const request = await requestDocument(keys);
-    state.lastKeys = keys;
-    const path = joinPath(dataRoot(state.settings), "requests", `${request.request_id}.json`);
+    const forcedKeys = keys.filter((key) => state.forceKeys.has(key));
+    const root = await validatedDataRoot(state.settings);
+    const path = joinPath(root, "requests", `${request.request_id}.json`);
     await atomicWrite(path, request);
-    await launch(path, request.request_id);
+    const result = await launch(path, request.request_id, root);
+    if (result.status === "STALE") {
+      state.queue.add(keys);
+      return;
+    }
+    for (const key of forcedKeys) state.forceKeys.delete(key);
   }
 
   function installNotifier() {
@@ -387,6 +448,8 @@ var ZoteroMineruRuntime = (() => {
     state.prefObserver = {
       observe(_subject, _topic, name) {
         const enabled = prefAdapter().getBool("enabled", false);
+        const previousCommand = state.settings.command;
+        const previousDataRoot = state.settings.dataRoot;
         state.settings.command = prefAdapter().getString("command", state.settings.command);
         state.settings.dataRoot = prefAdapter().getString("dataRoot", state.settings.dataRoot);
         state.settings.cpu = prefAdapter().getBool("cpu", state.settings.cpu);
@@ -397,6 +460,9 @@ var ZoteroMineruRuntime = (() => {
         } else if (!enabled) {
           state.settings.enabled = false;
           state.queue.cancel();
+        } else if (state.settings.enabled
+          && (state.settings.command !== previousCommand || state.settings.dataRoot !== previousDataRoot)) {
+          allParentKeys().then((keys) => state.queue.add(keys)).catch((error) => Zotero.logError(error));
         }
       }
     };

@@ -45,6 +45,14 @@ class StateStore:
             (library_id, attachment_key),
         ).fetchone()
 
+    def remove_attachment(self, library_id: str, parent_item_key: str, attachment_key: str) -> bool:
+        cursor = self.db.execute(
+            "DELETE FROM attachment_state WHERE library_id=? AND parent_item_key=? AND attachment_key=?",
+            (library_id, parent_item_key, attachment_key),
+        )
+        self.db.commit()
+        return cursor.rowcount > 0
+
     def record(self, *, library_id: str, parent_item_key: str, attachment_key: str, attachment_version: int,
                status: str, request_id: str, updated_at: str, artifact_path: str | None = None,
                error_summary: str | None = None, successful_version: int | None = None) -> None:
@@ -57,7 +65,11 @@ class StateStore:
               parent_item_key=excluded.parent_item_key, attachment_version=excluded.attachment_version,
               status=excluded.status,
               successful_version=COALESCE(excluded.successful_version, attachment_state.successful_version),
-              artifact_path=excluded.artifact_path,
+              artifact_path=CASE
+                WHEN excluded.successful_version IS NOT NULL THEN excluded.artifact_path
+                WHEN attachment_state.successful_version IS NULL THEN excluded.artifact_path
+                ELSE attachment_state.artifact_path
+              END,
               error_summary=excluded.error_summary, last_request_id=excluded.last_request_id,
               updated_at=excluded.updated_at
             """,

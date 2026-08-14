@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import traceback
 from pathlib import Path
 from typing import Any, Callable
@@ -45,6 +46,91 @@ class SyncRunner:
             return validate_request(json.loads(path.read_text(encoding="utf-8")))
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise ProtocolError(f"cannot read request JSON: {exc}") from exc
+
+    @staticmethod
+    def _remove_path(path: Path) -> None:
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+
+    def _recover_artifact_swap(self, artifact_dir: Path) -> None:
+        backup = artifact_dir.with_name(f".{artifact_dir.name}.backup")
+        if not backup.exists():
+            return
+        if artifact_dir.exists():
+            self._remove_path(backup)
+        else:
+            os.replace(backup, artifact_dir)
+
+    def _commit_artifact(self, attempt_dir: Path, artifact_dir: Path) -> None:
+        artifact_dir.parent.mkdir(parents=True, exist_ok=True)
+        self._recover_artifact_swap(artifact_dir)
+        backup = artifact_dir.with_name(f".{artifact_dir.name}.backup")
+        if artifact_dir.exists():
+            os.replace(artifact_dir, backup)
+        try:
+            os.replace(attempt_dir, artifact_dir)
+        except Exception:
+            if not artifact_dir.exists() and backup.exists():
+                os.replace(backup, artifact_dir)
+            raise
+        if backup.exists():
+            self._remove_path(backup)
+
+    def _cleanup_empty_attempt_parents(self, attempt_dir: Path) -> None:
+        boundary = self.paths.attempts.resolve()
+        current = attempt_dir.parent.resolve()
+        while current != boundary and current.is_relative_to(boundary):
+            try:
+                current.rmdir()
+            except OSError:
+                break
+            current = current.parent
+
+    def _valid_success_artifact(
+        self,
+        prior: Any,
+        request: dict[str, Any],
+        item: dict[str, Any],
+        artifact_dir: Path,
+    ) -> tuple[str, str] | None:
+        stored_path = prior["artifact_path"] if prior else None
+        if not stored_path:
+            return None
+        try:
+            expected = artifact_dir.resolve()
+            stored = Path(stored_path).expanduser().resolve()
+            if stored != expected or not stored.is_dir():
+                return None
+            manifest_path = stored / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if not isinstance(manifest, dict):
+                return None
+            expected_fields = {
+                "schema_version": 1,
+                "library_id": request["library_id"],
+                "parent_item_key": item["parent_item_key"],
+                "attachment_key": item["attachment_key"],
+                "attachment_version": item["attachment_version"],
+            }
+            if any(manifest.get(key) != value for key, value in expected_fields.items()):
+                return None
+            raw_markdown = manifest.get("markdown")
+            if not isinstance(raw_markdown, str) or not raw_markdown:
+                return None
+            markdown = Path(raw_markdown).expanduser()
+            if not markdown.is_absolute():
+                markdown = stored / markdown
+            markdown = markdown.resolve()
+            if not markdown.is_relative_to(stored) or not markdown.is_file():
+                return None
+            return str(stored), str(markdown)
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+            return None
 
     @staticmethod
     def _library_id(payload: dict[str, Any], data: dict[str, Any]) -> Any:
@@ -109,11 +195,15 @@ class SyncRunner:
         self.paths.prepare()
         request_file = Path(request_path)
         request = self._request(request_file)
-        result_file = self.paths.results / f"{request['request_id']}.json"
+        result_file = self.paths.result_file(request["request_id"])
         entries: list[dict[str, Any]] = []
         with SyncLock(self.paths.lock, request["request_id"]):
             with StateStore(self.paths.state_db) as state:
-                ready: list[tuple[dict[str, Any], Path, dict[str, Any]]] = []
+                ready: list[tuple[dict[str, Any], Path, dict[str, Any], Path]] = []
+                for removed in request.get("removed_attachments", []):
+                    state.remove_attachment(
+                        request["library_id"], removed["parent_item_key"], removed["attachment_key"]
+                    )
                 for item in request.get("blocked_duplicates", []):
                     entries.append(self._record(state, request, item, "BLOCKED_DUPLICATE",
                                                 reason="plugin marked duplicate"))
@@ -133,50 +223,72 @@ class SyncRunner:
                         continue
                     prior = state.get(request["library_id"], item["attachment_key"])
                     successful_version = prior["successful_version"] if prior else None
+                    artifact_dir = self.paths.artifact_dir(
+                        request["library_id"], item["parent_item_key"], item["attachment_key"]
+                    )
+                    self._recover_artifact_swap(artifact_dir)
+                    valid_artifact = self._valid_success_artifact(prior, request, item, artifact_dir)
                     if (prior and (prior["status"] == "SUCCESS" or successful_version is not None)
                             and (successful_version if successful_version is not None else prior["attachment_version"]) == item["attachment_version"]
-                            and not item.get("force", False)):
-                        artifact_path = prior["artifact_path"]
+                            and not item.get("force", False) and valid_artifact is not None):
+                        artifact_path, markdown = valid_artifact
                         entries.append(self._record(
                             state, request, item, "SKIPPED", reason="attachment version already succeeded",
-                            artifact_path=artifact_path, successful_version=item["attachment_version"],
+                            artifact_path=artifact_path, markdown=markdown,
+                            successful_version=item["attachment_version"],
                         ))
                         continue
-                    ready.append((item, path, parent_data))
+                    ready.append((item, path, parent_data, artifact_dir))
 
-                for item, pdf_path, parent_data in ready:
-                    artifact_dir = self.paths.artifact_dir(request["library_id"], item["parent_item_key"], item["attachment_key"])
-                    artifact_dir.mkdir(parents=True, exist_ok=True)
+                for item, pdf_path, parent_data, artifact_dir in ready:
+                    attempt_dir = self.paths.attempt_dir(
+                        request["request_id"], request["library_id"],
+                        item["parent_item_key"], item["attachment_key"],
+                    )
+                    if attempt_dir.exists():
+                        self._remove_path(attempt_dir)
+                    attempt_dir.mkdir(parents=True, exist_ok=True)
                     raw_language = str(parent_data.get("language") or item.get("language") or "").casefold()
                     lang = "ch" if raw_language == "ch" or raw_language.startswith(("zh", "chi", "chinese")) else "en"
                     try:
                         conversion = self.converter(pdf_path, backend="pipeline", lang=lang, method="auto",
-                                                    device="cpu", output_dir=artifact_dir)
+                                                    device="cpu", output_dir=attempt_dir)
                         logs = getattr(conversion, "log_lines", []) or []
-                        (artifact_dir / "mineru.log").write_text("\n".join(map(str, logs)) + "\n", encoding="utf-8")
+                        (attempt_dir / "mineru.log").write_text("\n".join(map(str, logs)) + "\n", encoding="utf-8")
                         if not getattr(conversion, "success", False):
                             raise RuntimeError(getattr(conversion, "error", None) or "MinerU conversion failed")
-                        output_md = Path(getattr(conversion, "output_md", artifact_dir / f"{pdf_path.stem}.md"))
+                        output_md = Path(getattr(conversion, "output_md", attempt_dir / f"{pdf_path.stem}.md"))
                         if not output_md.is_file():
                             raise RuntimeError("MinerU reported success but Markdown output is missing")
+                        attempt_root = attempt_dir.resolve()
+                        output_md = output_md.resolve()
+                        if not output_md.is_relative_to(attempt_root):
+                            raise RuntimeError("MinerU Markdown output is outside the staged archive directory")
                         artifact_root = artifact_dir.resolve()
-                        if not output_md.resolve().is_relative_to(artifact_root):
-                            raise RuntimeError("MinerU Markdown output is outside the archive directory")
+                        final_markdown = artifact_root / output_md.relative_to(attempt_root)
+                        log_path = attempt_dir / "mineru.log"
+                        log_path.write_text(
+                            log_path.read_text(encoding="utf-8").replace(str(attempt_root), str(artifact_root)),
+                            encoding="utf-8",
+                        )
                         manifest = {"schema_version": 1, "library_id": request["library_id"],
                                     "parent_item_key": item["parent_item_key"], "parent_item_version": item["parent_item_version"],
                                     "attachment_key": item["attachment_key"], "attachment_version": item["attachment_version"],
-                                    "markdown": str(output_md), "language": lang, "backend": "pipeline", "device": "cpu"}
-                        self._atomic_json(artifact_dir / "manifest.json", manifest)
+                                    "markdown": str(final_markdown), "language": lang, "backend": "pipeline", "device": "cpu"}
+                        self._atomic_json(attempt_dir / "manifest.json", manifest)
+                        self._commit_artifact(attempt_dir, artifact_dir)
+                        self._cleanup_empty_attempt_parents(attempt_dir)
                         entries.append(self._record(
                             state, request, item, "SUCCESS", artifact_path=str(artifact_dir),
-                            markdown=str(output_md), successful_version=item["attachment_version"],
+                            markdown=str(final_markdown), successful_version=item["attachment_version"],
                         ))
                     except Exception as exc:
-                        if not (artifact_dir / "mineru.log").exists():
-                            (artifact_dir / "mineru.log").write_text(traceback.format_exc(), encoding="utf-8")
+                        if attempt_dir.exists() and not (attempt_dir / "mineru.log").exists():
+                            (attempt_dir / "mineru.log").write_text(traceback.format_exc(), encoding="utf-8")
                         reason = str(exc)
                         entries.append(self._record(
-                            state, request, item, "FAILED", reason=reason, artifact_path=str(artifact_dir),
+                            state, request, item, "FAILED", reason=reason,
+                            artifact_path=str(attempt_dir) if attempt_dir.exists() else None,
                         ))
                 document = result_document(request, entries)
                 self._atomic_json(result_file, document)
@@ -184,7 +296,7 @@ class SyncRunner:
 
     def write_protocol_error(self, request_path: str | Path, error: Exception) -> Path:
         self.paths.prepare()
-        path = self.paths.results / f"{Path(request_path).stem}.json"
+        path = self.paths.protocol_error_file(request_path)
         self._atomic_json(path, {"schema_version": 1, "protocol_version": "1", "request_id": path.stem,
                                  "generated_at": utc_now(), "status": "FAILED", "counts": {"FAILED": 1},
                                  "entries": [{"status": "FAILED", "reason": str(error)}]})

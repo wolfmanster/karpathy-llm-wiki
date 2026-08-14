@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -49,5 +50,39 @@ def _api_module() -> Any:
     return module
 
 
+@contextmanager
+def _cpu_thread_override(module: Any) -> Any:
+    """Reapply the CLI thread limit after the upstream environment setup."""
+    raw_threads = os.environ.get("ZOTERO_MINERU_CPU_THREADS")
+    if not raw_threads:
+        yield
+        return
+    try:
+        threads = int(raw_threads)
+    except ValueError:
+        threads = 0
+    run_core = getattr(module, "run_core", None)
+    core_module = sys.modules.get(getattr(run_core, "__module__", ""))
+    original_setup = getattr(core_module, "setup_env", None)
+    if threads <= 0 or not callable(original_setup):
+        yield
+        return
+
+    def configured_setup(backend: str, device: str) -> None:
+        original_setup(backend, device)
+        if str(backend).casefold() == "pipeline" and str(device).casefold() == "cpu":
+            os.environ["OMP_NUM_THREADS"] = str(threads)
+            os.environ["MINERU_PDF_RENDER_THREADS"] = str(threads)
+
+    core_module.setup_env = configured_setup
+    try:
+        yield
+    finally:
+        if core_module.setup_env is configured_setup:
+            core_module.setup_env = original_setup
+
+
 def convert_document(*args: Any, **kwargs: Any) -> Any:
-    return _api_module().convert_document(*args, **kwargs)
+    module = _api_module()
+    with _cpu_thread_override(module):
+        return module.convert_document(*args, **kwargs)

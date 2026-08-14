@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from hashlib import sha256
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -55,6 +56,10 @@ class SyncPaths:
         return self.root / "archive"
 
     @property
+    def attempts(self) -> Path:
+        return self.root / "attempts"
+
+    @property
     def state_db(self) -> Path:
         return self.root / "state.sqlite"
 
@@ -63,10 +68,27 @@ class SyncPaths:
         return self.root / "sync.lock"
 
     def prepare(self) -> None:
-        for path in (self.root, self.requests, self.results, self.archive):
+        for path in (self.root, self.requests, self.results, self.archive, self.attempts):
             path.mkdir(parents=True, exist_ok=True)
 
     def artifact_dir(self, library_id: str, parent_key: str, attachment_key: str) -> Path:
         if not all(_SAFE_ID.fullmatch(part) for part in (library_id, parent_key, attachment_key)):
             raise ValueError("unsafe Zotero identifier")
         return self.archive.joinpath(library_id, parent_key, attachment_key)
+
+    def attempt_dir(self, request_id: str, library_id: str, parent_key: str, attachment_key: str) -> Path:
+        if not all(_SAFE_ID.fullmatch(part) for part in (request_id, library_id, parent_key, attachment_key)):
+            raise ValueError("unsafe synchronization identifier")
+        return self.attempts.joinpath(request_id, library_id, parent_key, attachment_key)
+
+    def result_file(self, request_id: str) -> Path:
+        if not _SAFE_ID.fullmatch(request_id):
+            raise ValueError("unsafe request identifier")
+        path = (self.results / f"{request_id}.json").resolve()
+        if not path.is_relative_to(self.results.resolve()):
+            raise ValueError("result path escapes results directory")
+        return path
+
+    def protocol_error_file(self, request_path: str | Path) -> Path:
+        digest = sha256(str(Path(request_path)).encode("utf-8")).hexdigest()[:16]
+        return self.result_file(f"protocol-error-{digest}")
