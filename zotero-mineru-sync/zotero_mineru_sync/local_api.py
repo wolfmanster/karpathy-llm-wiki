@@ -95,7 +95,8 @@ class ZoteroLocalApi:
             if not isinstance(key, str) or not key:
                 return None
             attachment_root = (self.storage_root / key).resolve()
-            candidate = (attachment_root / raw.removeprefix("storage:")).resolve()
+            relative_path = raw.removeprefix("storage:").replace("\\", "/")
+            candidate = (attachment_root / relative_path).resolve()
             if not candidate.is_relative_to(attachment_root):
                 raise ZoteroApiError("attachment path escapes Zotero storage")
             return candidate

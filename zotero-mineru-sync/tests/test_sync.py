@@ -299,8 +299,9 @@ def test_storage_attachment_path_is_resolved_inside_zotero_storage(tmp_path):
     api = ZoteroLocalApi(storage_root=str(storage))
     attachment = {"key": "A1", "data": {"path": "storage:paper.pdf"}}
     assert api.resolve_pdf_path(attachment) == pdf.resolve()
-    with pytest.raises(ZoteroApiError, match="escapes"):
-        api.resolve_pdf_path({"key": "A1", "data": {"path": "storage:..\\outside.pdf"}})
+    for escaped_path in ("storage:../outside.pdf", "storage:..\\outside.pdf"):
+        with pytest.raises(ZoteroApiError, match="escapes"):
+            api.resolve_pdf_path({"key": "A1", "data": {"path": escaped_path}})
 
 
 def test_file_uri_windows_drive_path_is_decoded(tmp_path):
