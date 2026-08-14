@@ -10,6 +10,7 @@ $fixture = Join-Path $runRoot "paper.pdf"
 $marker = Join-Path $runRoot "seed-marker.json"
 $extensions = Join-Path $profile "extensions"
 $pluginXpi = Join-Path $runRoot "zotero-mineru-sync.xpi"
+$pluginSource = Join-Path $runRoot "plugin-source"
 $launcher = Join-Path $runRoot "launch-sync.cmd"
 $mineruPython = Join-Path $project "..\MinerU-GUI\.venv\Scripts\python.exe"
 $zotero = "C:\Program Files\Zotero\zotero.exe"
@@ -27,8 +28,11 @@ writer.add_blank_page(width=612, height=792)
 with Path(r'''$fixture''').open('wb') as handle:
     writer.write(handle)
 "@ | & python -
+if (-not (Test-Path -LiteralPath $fixture -PathType Leaf)) { throw "failed to create project-local PDF fixture: $fixture" }
 
-& python (Join-Path $project "build_plugin.py") --output $pluginXpi
+Copy-Item -LiteralPath (Join-Path $project "zotero-plugin") -Destination $pluginSource -Recurse
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot "helper\bootstrap.js") -Destination (Join-Path $pluginSource "e2e_helper.js")
+& python (Join-Path $project "build_plugin.py") --source $pluginSource --output $pluginXpi
 Copy-Item -LiteralPath $pluginXpi -Destination (Join-Path $extensions "zotero-mineru-sync@local.xpi")
 if (-not (Test-Path -LiteralPath $mineruPython)) { throw "MinerU-GUI venv Python not found: $mineruPython" }
 @"
@@ -57,11 +61,16 @@ $userPrefs = @(
   ('user_pref("extensions.zotero-mineru-sync.command", ' + (JsonLiteral ($launcher -replace '\\', '/')) + ');'),
   ('user_pref("extensions.zotero-mineru-sync.dataRoot", ' + (JsonLiteral ($outputRoot -replace '\\', '/')) + ');'),
   'user_pref("extensions.zotero-mineru-sync.cpu", true);',
-  'user_pref("extensions.zotero-mineru-sync.cpuThreads", 1);'
+  'user_pref("extensions.zotero-mineru-sync.cpuThreads", 1);',
+  ('user_pref("extensions.zotero-mineru-sync-e2e.fixture", ' + (JsonLiteral ($fixture -replace '\\', '/')) + ');'),
+  ('user_pref("extensions.zotero-mineru-sync-e2e.marker", ' + (JsonLiteral ($marker -replace '\\', '/')) + ');'),
+  ('user_pref("extensions.zotero-mineru-sync-e2e.dataRoot", ' + (JsonLiteral ($outputRoot -replace '\\', '/')) + ');'),
+  ('user_pref("extensions.zotero-mineru-sync.e2eBootstrap", ' + (JsonLiteral $true) + ');')
 )
 $userPrefs | Set-Content -LiteralPath (Join-Path $profile "user.js") -Encoding UTF8
 
 $env:ZOTERO_GUI_PATH = (Resolve-Path (Join-Path $project "..\MinerU-GUI")).Path
+$env:ZOTERO_STORAGE_ROOT = Join-Path $dataDir "storage"
 $env:MOZ_CRASHREPORTER_DISABLE = "1"
 $env:PYTHONDONTWRITEBYTECODE = "1"
 $env:ZOTERO_MINERU_DATA_ROOT = ($outputRoot -replace '\\', '/')
@@ -70,7 +79,7 @@ $startInfo.FileName = $zotero
 $startInfo.WorkingDirectory = $project
 $startInfo.UseShellExecute = $false
 # ProcessStartInfo avoids Start-Process's lossy argument joining on Windows.
-$startInfo.Arguments = '--headless --new-instance --profile "' + $profile + '" -datadir "' + $dataDir + '"'
+$startInfo.Arguments = '--headless --new-instance -purgecaches --profile "' + $profile + '" -datadir "' + $dataDir + '"'
 if ($startInfo.Arguments -notmatch [regex]::Escape($dataDir)) { throw "Zotero data directory was not included in launch arguments" }
 $process = [System.Diagnostics.Process]::Start($startInfo)
 
@@ -100,24 +109,51 @@ try {
   $resultDeadline = (Get-Date).AddMinutes(10)
   $result = $null
   while ((Get-Date) -lt $resultDeadline) {
-    $files = Get-ChildItem -LiteralPath (Join-Path $outputRoot "results") -Filter *.json -File -ErrorAction SilentlyContinue
-    foreach ($file in $files) {
-      $candidate = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
-      if ($candidate.entries.Count -gt 0) {
+    if (Test-Path -LiteralPath $marker) {
+      $candidate = Get-Content -LiteralPath $marker -Raw -Encoding UTF8 | ConvertFrom-Json
+      if ($candidate.status -eq "completed") {
         $result = $candidate
         break
       }
+      if ($candidate.status -eq "error") { throw "actual E2E helper failed: $($candidate.error)" }
     }
-    if ($result) { break }
     Start-Sleep -Seconds 3
   }
-  if (-not $result) { throw "sync result did not arrive within 10 minutes" }
+  if (-not $result) { throw "duplicate/merge lifecycle did not complete within 10 minutes" }
   $result | ConvertTo-Json -Depth 10
-  if ($result.counts.SUCCESS -lt 1) { throw "actual E2E did not produce a SUCCESS result" }
-  $artifact = Join-Path $outputRoot ("archive\{0}\{1}\{2}" -f $result.library_id, $seed.parent_item_key, $seed.attachment_key)
+  $blockedEntries = @($result.blocked_result.entries)
+  if ($result.blocked_result.counts.BLOCKED_DUPLICATE -ne 2 -or $blockedEntries.Count -ne 2) {
+    throw "actual E2E did not skip both duplicate attachments before merge"
+  }
+  if ($result.archive_count_before_merge -ne 0) {
+    throw "an archive was produced before the Zotero merge"
+  }
+  if (-not $result.duplicate_parent_deleted) {
+    throw "Zotero merge did not delete the duplicate parent item"
+  }
+  $finalEntries = @($result.final_result.entries)
+  $finalSuccessEntries = @($finalEntries | Where-Object { $_.status -eq "SUCCESS" })
+  if ($result.final_result.counts.SUCCESS -ne 1 -or $finalSuccessEntries.Count -ne 1) {
+    throw "post-merge result did not contain exactly one successful conversion"
+  }
+  if ($finalSuccessEntries[0].parent_item_key -ne $result.surviving_parent_item_key -or
+      $finalSuccessEntries[0].attachment_key -ne $result.surviving_attachment_key) {
+    throw "successful conversion did not target the surviving Zotero attachment"
+  }
+  $allResults = @(Get-ChildItem -LiteralPath (Join-Path $outputRoot "results") -Filter *.json -File -ErrorAction SilentlyContinue |
+    ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw -Encoding UTF8 | ConvertFrom-Json })
+  $successEntries = @($allResults | ForEach-Object { @($_.entries) } | Where-Object { $_.status -eq "SUCCESS" })
+  if ($successEntries.Count -ne 1) { throw "expected exactly one successful conversion result, found $($successEntries.Count)" }
+  if ($result.archive_count_after_merge -ne 1) { throw "expected exactly one archive manifest, found $($result.archive_count_after_merge)" }
+  $artifact = Join-Path $outputRoot ("archive\{0}\{1}\{2}" -f $result.final_result.library_id, $result.surviving_parent_item_key, $result.surviving_attachment_key)
   if (-not (Test-Path -LiteralPath (Join-Path $artifact "manifest.json"))) { throw "manifest.json is missing: $artifact" }
-  if (-not (Get-ChildItem -LiteralPath $artifact -Filter *.md -File -ErrorAction SilentlyContinue)) { throw "Markdown artifact is missing: $artifact" }
-  Write-Output "actual Zotero E2E passed"
+  if (@(Get-ChildItem -LiteralPath $outputRoot -Filter manifest.json -Recurse -File -ErrorAction SilentlyContinue).Count -ne 1) {
+    throw "expected exactly one archived manifest"
+  }
+  if (@(Get-ChildItem -LiteralPath $artifact -Filter *.md -File -ErrorAction SilentlyContinue).Count -ne 1) {
+    throw "Markdown artifact count is not one: $artifact"
+  }
+  Write-Output "actual Zotero duplicate/merge E2E passed"
 }
 finally {
   if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }

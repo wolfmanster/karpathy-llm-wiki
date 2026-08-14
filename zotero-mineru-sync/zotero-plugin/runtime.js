@@ -5,6 +5,7 @@ var ZoteroMineruRuntime = (() => {
   const PREF_BRANCH = "extensions.zotero-mineru-sync.";
   const DELAY_MS = 15000;
   let state = null;
+  let e2eHelperScope = null;
 
   function nativePath(path) {
     const value = String(path ?? "");
@@ -336,6 +337,32 @@ var ZoteroMineruRuntime = (() => {
     }
   }
 
+  function startE2EHelper() {
+    let enabled;
+    try { enabled = Services.prefs.getBoolPref(PREF_BRANCH + "e2eBootstrap", false); }
+    catch (_) { return; }
+    if (!enabled) return;
+    try {
+      const helperURI = state.rootURI + "e2e_helper.js";
+      const helperScope = {
+        Zotero,
+        Services,
+        Cc,
+        Ci,
+        Components,
+        ChromeUtils,
+        IOUtils,
+        PathUtils
+      };
+      Services.scriptloader.loadSubScript(helperURI, helperScope);
+      if (typeof helperScope.startup !== "function") throw new Error("E2E helper has no startup() hook");
+      e2eHelperScope = helperScope;
+      helperScope.startup({ id: "zotero-mineru-sync-e2e-helper@local", version: "0.1.0", rootURI: helperURI });
+    } catch (error) {
+      Zotero.logError(error);
+    }
+  }
+
   async function startup({ id, version, rootURI }) {
     saveDefaults();
     const pref = prefAdapter();
@@ -378,11 +405,14 @@ var ZoteroMineruRuntime = (() => {
     if (settings.enabled) {
       state.queue.add(await allParentKeys());
     }
+    startE2EHelper();
   }
 
   function onMainWindowLoad({ window }) { installMenus(window); }
   function onMainWindowUnload({ window }) { removeMenus(window); }
   function shutdown() {
+    e2eHelperScope?.shutdown?.();
+    e2eHelperScope = null;
     state?.queue.cancel();
     state?.unregister?.();
     if (state?.prefObserver) Services.prefs.removeObserver(PREF_BRANCH, state.prefObserver);
